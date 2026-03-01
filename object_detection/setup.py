@@ -29,6 +29,7 @@ setup(
             'center_depth = object_detection.center_depth:main',
             'yolo_to_depth = object_detection.yolo_to_depth:main',
             'yolo_to_pose = object_detection.yolo_to_pose:main',
+            'yolo_to_map = object_detection.yolo_to_map:main',
         ],
     },
 )

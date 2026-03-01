@@ -24,6 +24,11 @@ import tf_transformations
 from cv_bridge import CvBridge
 from tf2_geometry_msgs import do_transform_point
 
+# Forces cpu usage for PyTorch, only needed for nvidia cuda < 7.0 cards (i.e. 1080 ti)
+# Also not needed for no gpu systems
+os.environ['CUDA_VISIBLE_DEVICES'] = ''
+torch.cuda.is_available = lambda: False
+
 # For AMD ROCm
 # os.putenv("HSA_OVERRIDE_GFX_VERSION", "10.3.0")
 # For NVIDIA CUDA
@@ -35,7 +40,9 @@ class DetectionNode(Node):
         self.bridge = CvBridge()
         
         self.declare_parameter('confidence_threshold', 0.8)
+        self.declare_parameter('distance_threshold', 1.0)  # Distance in meters to consider detections as the same object
         self.confidence_threshold = self.get_parameter('confidence_threshold').get_parameter_value().double_value
+        self.distance_threshold = self.get_parameter('distance_threshold').get_parameter_value().double_value
 
         self.detections = self.create_publisher(Image, '/yolo_detections', 10)
         self.tf_broadcaster = TransformBroadcaster(self)
@@ -62,6 +69,10 @@ class DetectionNode(Node):
 
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
+        
+        # Track persistent detections: {object_id: {'position': (x, y, z), 'frame_id': str, 'class': int}}
+        self.tracked_objects = {}
+        self.next_object_id = 0
 
     def info_callback(self, msg: CameraInfo):
         if self.K is None:
@@ -73,6 +84,46 @@ class DetectionNode(Node):
             self.latest_depth_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='passthrough')
         except Exception as e:
             self.get_logger().error(f'Error processing depth image: {e}')
+
+    def euclidean_distance(self, pos1, pos2):
+        """Calculate Euclidean distance between two 3D positions."""
+        return np.sqrt(sum((a - b) ** 2 for a, b in zip(pos1, pos2)))
+
+    def find_closest_object(self, position):
+        """Find if a detection matches an existing tracked object within distance threshold."""
+        closest_id = None
+        min_distance = self.distance_threshold
+        
+        for obj_id, obj_data in self.tracked_objects.items():
+            distance = self.euclidean_distance(position, obj_data['position'])
+            if distance < min_distance:
+                min_distance = distance
+                closest_id = obj_id
+        
+        return closest_id
+
+    def update_or_create_object(self, position, class_name, class_id):
+        """Update existing object or create new one. Returns the frame_id and object_id."""
+        closest_id = self.find_closest_object(position)
+        
+        if closest_id is not None:
+            # Update existing object
+            self.tracked_objects[closest_id]['position'] = position
+            return self.tracked_objects[closest_id]['frame_id'], closest_id
+        else:
+            # Create new object
+            new_id = self.next_object_id
+            self.next_object_id += 1
+            frame_id = f"{class_name}_{new_id}"
+            
+            self.tracked_objects[new_id] = {
+                'position': position,
+                'frame_id': frame_id,
+                'class': class_id
+            }
+            self.get_logger().info(f"New detection: {frame_id} at {position}")
+            return frame_id, new_id
+
 
     def image_callback(self, frame):
         frame = self.bridge.imgmsg_to_cv2(frame, "bgr8")
@@ -141,20 +192,15 @@ class DetectionNode(Node):
                                     timeout=Duration(seconds=0.05)
                                 )
                                 transformed = do_transform_point(point, transform)
+                                
+                                position = (transformed.point.x, transformed.point.y, transformed.point.z)
+                                
+                                # Get or create frame_id based on Euclidean distance to avoid duplicates
+                                frame_id, obj_id = self.update_or_create_object(position, r.names[cls], cls)
 
-                                # Broadcast TF for this detection
-                                t = TransformStamped()
-                                t.header.stamp = self.get_clock().now().to_msg()
-                                t.header.frame_id = self.target_frame
-                                t.child_frame_id = "linear_board_1"  # Unique per detection
-
-                                t.transform.translation.x = transformed.point.x
-                                t.transform.translation.y = transformed.point.y
-                                t.transform.translation.z = transformed.point.z
-                                # t.transform.rotation.z = 0.0
-                                # t.transform.rotation.w = 1.0
-
-                                self.tf_broadcaster.sendTransform(t)
+                                # Update position in tracked objects (for persistent broadcasting)
+                                self.tracked_objects[obj_id]['position'] = position
+                                
                                 depth_text = f"{z:.2f}m"
                             except Exception as e:
                                 self.get_logger().warning(f"TF transform failed: {e}")
@@ -172,6 +218,20 @@ class DetectionNode(Node):
                 
                 # Draw center point
                 cv2.circle(frame, (cx, cy), 2, (0, 255, 0), -1)
+        
+        # Broadcast transforms for all tracked objects (including those not in current frame)
+        for obj_id, obj_data in self.tracked_objects.items():
+            t = TransformStamped()
+            t.header.stamp = self.get_clock().now().to_msg()
+            t.header.frame_id = self.target_frame
+            t.child_frame_id = obj_data['frame_id']
+            
+            t.transform.translation.x = obj_data['position'][0]
+            t.transform.translation.y = obj_data['position'][1]
+            t.transform.translation.z = obj_data['position'][2]
+            
+            self.tf_broadcaster.sendTransform(t)
+        
         self.detections.publish(self.bridge.cv2_to_imgmsg(frame, 'bgr8'))
 
 def main():
