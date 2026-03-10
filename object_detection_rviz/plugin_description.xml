@@ -1,0 +1,9 @@
+<library path="object_detection_rviz">
+  <class name="object_detection/CapturePanel"
+         type="object_detection_rviz::CapturePanel"
+         base_class_type="rviz_common::Panel">
+    <description>
+      A panel for capturing images from a ROS 2 topic.
+    </description>
+  </class>
+</library>

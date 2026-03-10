@@ -23,10 +23,7 @@ setup(
     data_files=[
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
-        ('share/' + package_name, ['package.xml']),git status
-        
-        
-        # This one line now handles ALL files inside 'models/' recursively
+        ('share/' + package_name, ['package.xml']),
     ] + generate_data_files('models', 'models'),
     
     install_requires=['setuptools'],
@@ -44,6 +41,7 @@ setup(
             'yolo_to_map = object_detection.yolo_to_map:main',
             'yolo_to_map_openvino = object_detection.yolo_to_map_openvino:main',
             'yolo_low_resource = object_detection.yolo_low_resource:main',
+            'capture_image = object_detection.capture_image:main',
         ],
     },
 )
